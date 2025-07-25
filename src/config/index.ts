@@ -39,8 +39,6 @@ export const config = {
   pinataApiSecret: process.env.PINATA_API_SECRET || '',
   pinataJwt: process.env.PINATA_JWT || '',
 
-  // Meteora DLMM Program ID
-  meteoraDlmmProgramId: new PublicKey('LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo'),
 
   // DBC Configuration
   dbcConfigKey: process.env.DBC_CONFIG_KEY || '',
