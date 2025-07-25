@@ -21,7 +21,7 @@ export const config = {
 
   // Token settings
   defaultDecimals: 9,
-  defaultSupply: 1_000_000_000_000_000_000n, // 1 billion with 9 decimals
+  defaultSupply: 1_000_000_000_000_000_000, // 1 billion with 9 decimals (as number)
 
   // Launch fee (in lamports)
   launchFeeLamports: Math.floor(

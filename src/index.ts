@@ -14,7 +14,18 @@ validateConfig();
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://localhost:3002',
+    'https://*.vercel.app',
+    'https://launchium.vercel.app',
+    'https://launchium-token-creator-5c4m4oj1t-launchmes-projects.vercel.app',
+    'https://launchium-token-creator.vercel.app'
+  ],
+  credentials: true
+}));
 app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting

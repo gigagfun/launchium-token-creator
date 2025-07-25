@@ -1,15 +1,12 @@
-import React, { useState, useEffect } from 'react'
-import { useWallet } from '@solana/wallet-adapter-react'
-import axios from 'axios'
 import Head from 'next/head'
-import dynamic from 'next/dynamic'
+import Image from 'next/image'
+import { useState, useEffect } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
+import { WalletMultiButton } from '@solana/wallet-adapter-react-ui'
+import { Transaction } from '@solana/web3.js'
+import axios from 'axios'
 
-// Dynamic import with no SSR to prevent hydration issues
-const WalletMultiButton = dynamic(
-  () => import('@solana/wallet-adapter-react-ui').then((mod) => mod.WalletMultiButton),
-  { ssr: false }
-)
-
+// Types
 interface LaunchTokenRequest {
   userWallet: string
   name: string
@@ -19,23 +16,29 @@ interface LaunchTokenRequest {
   imageUpload?: string
   website?: string
   twitter?: string
-  discord?: string
+  telegram?: string
+}
+
+interface PrepareTokenResponse {
+  success: boolean
+  sessionId: string
+  mintAddress: string
+  transaction: string
+  message: string
 }
 
 interface LaunchTokenResponse {
   success: boolean
   mintAddress: string
-  metadataAddress: string
   userTokenAccount: string
-  totalSupply: string
   userBalance: string
-  transactionSignature: string
-  explorerUrl: string
   fee: string
+  explorerUrl: string
+  message?: string
 }
 
 export default function Home() {
-  const { publicKey, connected } = useWallet()
+  const { publicKey, connected, signTransaction } = useWallet()
   const [mounted, setMounted] = useState(false)
   const [formData, setFormData] = useState({
     name: '',
@@ -43,9 +46,10 @@ export default function Home() {
     description: '',
     website: '',
     twitter: '',
-    discord: ''
+    telegram: ''
   })
   const [loading, setLoading] = useState(false)
+  const [step, setStep] = useState<'form' | 'signing' | 'executing' | 'completed'>('form')
   const [result, setResult] = useState<LaunchTokenResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [imageFile, setImageFile] = useState<File | null>(null)
@@ -66,7 +70,7 @@ export default function Home() {
         description: '',
         website: '',
         twitter: '',
-        discord: ''
+        telegram: ''
       })
       setResult(null)
     }
@@ -147,7 +151,7 @@ export default function Home() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     
-    if (!connected || !publicKey) {
+    if (!connected || !publicKey || !signTransaction) {
       setError('Please connect your wallet')
       return
     }
@@ -160,12 +164,14 @@ export default function Home() {
     setError(null)
     setResult(null)
     setUploadProgress(0)
+    setStep('form')
 
     try {
+      // STEP 1: Prepare image
       let imageUpload = ''
       
-      // Convert image to base64 if file is selected
       if (imageFile) {
+        console.log('📤 Preparing image...')
         setUploadProgress(20)
         
         const reader = new FileReader()
@@ -178,10 +184,11 @@ export default function Home() {
         
         reader.readAsDataURL(imageFile)
         imageUpload = await base64Promise
-        setUploadProgress(50)
+        console.log('✅ Image prepared')
+        setUploadProgress(40)
       }
 
-      // Prepare token launch request
+      // STEP 2: Prepare transaction
       const requestData: LaunchTokenRequest = {
         userWallet: publicKey.toString(),
         name: formData.name.trim(),
@@ -201,84 +208,124 @@ export default function Home() {
         requestData.twitter = formData.twitter.trim()
       }
 
-      if (formData.discord.trim()) {
-        requestData.discord = formData.discord.trim()
+      if (formData.telegram.trim()) {
+        requestData.telegram = formData.telegram.trim()
+      }
+
+      setUploadProgress(60)
+      console.log('🚀 Preparing token transaction:', requestData)
+
+      const prepareResponse = await axios.post<PrepareTokenResponse>(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/token/prepare`,
+        requestData,
+        {
+          timeout: 120000,
+        }
+      )
+      
+      if (!prepareResponse.data.success) {
+        throw new Error('Failed to prepare transaction')
       }
 
       setUploadProgress(80)
+      setStep('signing')
 
-      const response = await axios.post<LaunchTokenResponse>(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/token/launch`,
-        requestData,
+      // STEP 3: User signs transaction
+      console.log('📝 Requesting user signature...')
+      
+      const transaction = Transaction.from(Buffer.from(prepareResponse.data.transaction, 'base64'))
+      const signedTransaction = await signTransaction(transaction)
+      
+      console.log('✅ Transaction signed by user')
+      setStep('executing')
+
+      // STEP 4: Execute signed transaction
+      console.log('⚡ Executing token creation...')
+      
+      const executeResponse = await axios.post<LaunchTokenResponse>(
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/token/execute`,
         {
-          timeout: 60000, // 60 second timeout
+          sessionId: prepareResponse.data.sessionId,
+          signedTransaction: signedTransaction.serialize().toString('base64')
+        },
+        {
+          timeout: 120000,
         }
       )
       
       setUploadProgress(100)
-      setResult(response.data)
+      setResult(executeResponse.data)
+      setStep('completed')
       
-      // Clear form after success
+      // Clear form on success
       setFormData({
         name: '',
         symbol: '',
         description: '',
         website: '',
         twitter: '',
-        discord: ''
+        telegram: ''
       })
       setImageFile(null)
       setImagePreview(null)
       
-    } catch (err: any) {
-      let errorMessage = 'Token creation failed'
+      console.log('🎉 Token created successfully!')
+
+    } catch (error: any) {
+      console.error('❌ Token creation failed:', error)
       
-      if (err.response?.data?.error) {
-        errorMessage = err.response.data.error
-      } else if (err.message) {
-        errorMessage = err.message
+      let errorMessage = 'Failed to create token'
+      
+      if (error.response?.data?.error) {
+        errorMessage = error.response.data.error
+      } else if (error.message) {
+        errorMessage = error.message
       }
-      
+
+      // Handle specific wallet errors
+      if (error.message?.includes('User rejected')) {
+        errorMessage = 'Transaction was rejected by user'
+      } else if (error.message?.includes('insufficient funds')) {
+        errorMessage = 'Insufficient SOL for transaction fees'
+      }
+
       setError(errorMessage)
+      setStep('form')
     } finally {
       setLoading(false)
+      setUploadProgress(0)
     }
   }
 
-  // Don't render wallet-dependent content until mounted
   if (!mounted) {
     return (
-      <>
-        <Head>
-          <title>Launchium - Token Creator</title>
-          <meta name="description" content="Launch your token in seconds with Launchium" />
-          <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-        </Head>
-        <div className="min-h-screen bg-black flex items-center justify-center">
-          <div className="text-white">Loading...</div>
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-pulse">
+          <div className="w-8 h-8 bg-gray-300 rounded-full"></div>
         </div>
-      </>
+      </div>
     )
   }
 
   return (
     <>
       <Head>
-        <title>Launchium - Token Creator</title>
-        <meta name="description" content="Launch your token in seconds with Launchium" />
-        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        <title>Launchium - Create Your Token in Seconds</title>
+        <meta name="description" content="Launch immutable SPL tokens on Solana in 0-60 seconds. No code required." />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <link rel="icon" href="/favicon.svg" />
       </Head>
 
-      <div className="min-h-screen bg-black text-white">
+      <div className="min-h-screen bg-gray-50">
         {/* Header */}
-        <header className="border-b border-gray-800">
+        <header className="border-b border-gray-200 bg-white/80 backdrop-blur-sm sticky top-0 z-50">
           <div className="container mx-auto px-6 py-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
-                <img src="/logo.png" alt="Launchium" className="w-8 h-8" />
-                <span className="text-xl font-bold">Launchium</span>
+                <Image src="/logo.png" alt="Launchium" width={32} height={32} className="h-8 w-8" />
+                <span className="text-2xl font-bold gradient-text">Launchium</span>
               </div>
-              <WalletMultiButton className="!bg-gradient-to-r !from-blue-500 !to-purple-600 hover:!from-blue-600 hover:!to-purple-700 !rounded-lg" />
+              <WalletMultiButton className="!rounded-lg !px-6 !py-3" />
             </div>
           </div>
         </header>
@@ -286,55 +333,44 @@ export default function Home() {
         <div className="container mx-auto px-6">
           {/* Hero Section */}
           <div className="text-center py-20">
-            <h1 className="text-6xl font-bold mb-6">
+            <h1 className="text-6xl font-bold mb-6 text-gray-900">
               Launch a token
               <br />
-              <span className="bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+              <span className="gradient-text">
                 in seconds
               </span>
             </h1>
-            <p className="text-xl text-gray-300 mb-8 max-w-2xl mx-auto">
+            <p className="text-xl text-gray-600 mb-8 max-w-2xl mx-auto">
               Revolutionary platform that transforms ideas into tradeable tokens instantly.
               No code required.
             </p>
             
-            <div className="flex justify-center space-x-8 text-sm text-gray-400 mb-12">
+            <div className="flex justify-center space-x-8 text-sm text-gray-500 mb-12">
               <div className="flex items-center">
-                <div className="w-2 h-2 bg-gradient-to-r from-green-400 to-emerald-400 rounded-full mr-2"></div>
+                <div className="w-2 h-2 gradient-primary rounded-full mr-2"></div>
                 0-60 second launch
               </div>
               <div className="flex items-center">
-                <div className="w-2 h-2 bg-gradient-to-r from-green-400 to-emerald-400 rounded-full mr-2"></div>
+                <div className="w-2 h-2 gradient-primary rounded-full mr-2"></div>
                 Fully immutable
               </div>
               <div className="flex items-center">
-                <div className="w-2 h-2 bg-gradient-to-r from-green-400 to-emerald-400 rounded-full mr-2"></div>
+                <div className="w-2 h-2 gradient-primary rounded-full mr-2"></div>
                 No code required
               </div>
             </div>
 
-            {!connected && (
-              <div className="max-w-md mx-auto">
-                <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-8 border border-gray-700 shadow-2xl backdrop-blur-sm">
-                  <h2 className="text-2xl font-bold mb-4">Connect Wallet</h2>
-                  <p className="text-gray-300 mb-6">
-                    Connect your wallet to start creating tokens
-                  </p>
-                  <WalletMultiButton className="!bg-gradient-to-r !from-blue-500 !to-purple-600 hover:!from-blue-600 hover:!to-purple-700 !w-full !rounded-lg !py-3" />
-                </div>
-              </div>
-            )}
           </div>
 
-          {connected && (
-            <div className="max-w-2xl mx-auto pb-20">
-              <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-8 border border-gray-700 shadow-2xl backdrop-blur-sm">
-                <h2 className="text-2xl font-bold mb-8 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">Create Token</h2>
+          {/* Token Creation Form - Always Visible */}
+          <div className="max-w-2xl mx-auto pb-20">
+            <div className="card-light rounded-2xl p-8">
+              <h2 className="text-2xl font-bold mb-8 gradient-text">Create Token</h2>
                 
                 <form onSubmit={handleSubmit} className="space-y-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-200">Token Name *</label>
+                      <label className="block text-sm font-medium mb-2 text-gray-700">Token Name *</label>
                       <input
                         type="text"
                         name="name"
@@ -342,13 +378,13 @@ export default function Home() {
                         onChange={handleInputChange}
                         placeholder="e.g. My Token"
                         maxLength={32}
-                        className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 input-light"
                         required
                       />
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-200">Token Symbol *</label>
+                      <label className="block text-sm font-medium mb-2 text-gray-700">Token Symbol *</label>
                       <input
                         type="text"
                         name="symbol"
@@ -356,14 +392,14 @@ export default function Home() {
                         onChange={handleInputChange}
                         placeholder="e.g. TKN"
                         maxLength={10}
-                        className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 input-light"
                         required
                       />
                     </div>
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-200">Description *</label>
+                    <label className="block text-sm font-medium mb-2 text-gray-700">Description *</label>
                     <textarea
                       name="description"
                       value={formData.description}
@@ -371,10 +407,10 @@ export default function Home() {
                       placeholder="Describe your token..."
                       maxLength={200}
                       rows={4}
-                      className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      className="w-full px-4 py-3 input-light"
                       required
                     />
-                    <div className="text-right text-xs text-gray-400 mt-1">
+                    <div className="text-right text-xs text-gray-500 mt-1">
                       {formData.description.length}/200
                     </div>
                   </div>
@@ -382,45 +418,45 @@ export default function Home() {
                   {/* Optional Fields */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-200">Website</label>
+                      <label className="block text-sm font-medium mb-2 text-gray-700">Website</label>
                       <input
                         type="url"
                         name="website"
                         value={formData.website}
                         onChange={handleInputChange}
                         placeholder="https://..."
-                        className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 input-light"
                       />
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-200">Twitter</label>
+                      <label className="block text-sm font-medium mb-2 text-gray-700">Twitter</label>
                       <input
                         type="url"
                         name="twitter"
                         value={formData.twitter}
                         onChange={handleInputChange}
                         placeholder="https://twitter.com/..."
-                        className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        className="w-full px-4 py-3 input-light"
                       />
                     </div>
                     
                     <div>
-                      <label className="block text-sm font-medium mb-2 text-gray-200">Discord</label>
+                      <label className="block text-sm font-medium mb-2 text-gray-700">Telegram</label>
                       <input
                         type="url"
-                        name="discord"
-                        value={formData.discord}
+                        name="telegram"
+                        value={formData.telegram}
                         onChange={handleInputChange}
-                        placeholder="https://discord.gg/..."
-                        className="w-full px-4 py-3 rounded-lg bg-gray-800/50 border border-gray-600 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="https://t.me/..."
+                        className="w-full px-4 py-3 input-light"
                       />
                     </div>
                   </div>
 
                   {/* Image Upload */}
                   <div>
-                    <label className="block text-sm font-medium mb-2 text-gray-200">
+                    <label className="block text-sm font-medium mb-2 text-gray-700">
                       Token Logo (PNG/JPG, Max 4MB)
                     </label>
                     
@@ -435,22 +471,24 @@ export default function Home() {
                         />
                         <label
                           htmlFor="image-upload"
-                          className="w-full h-32 border-2 border-dashed border-gray-600 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-blue-400 hover:bg-blue-500/5 transition-all duration-300"
+                          className="w-full h-32 upload-area flex flex-col items-center justify-center cursor-pointer"
                         >
                           <svg className="w-8 h-8 text-gray-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                           </svg>
-                          <span className="text-gray-300 font-medium">Upload Logo</span>
-                          <span className="text-gray-400 text-sm">PNG, JPG or JPEG</span>
+                          <span className="text-gray-600 font-medium">Upload Logo</span>
+                          <span className="text-gray-500 text-sm">PNG, JPG or JPEG</span>
                         </label>
                       </div>
                     ) : (
                       <div className="relative">
-                        <img 
-                          src={imagePreview} 
-                          alt="Preview" 
-                          className="w-full h-32 object-cover rounded-lg border border-gray-600"
-                        />
+                        <div className="w-full h-32 rounded-lg border-2 border-gray-200 bg-gray-50 flex items-center justify-center">
+                          <img 
+                            src={imagePreview} 
+                            alt="Preview" 
+                            className="max-w-full max-h-full object-contain"
+                          />
+                        </div>
                         <button
                           type="button"
                           onClick={removeImage}
@@ -463,12 +501,30 @@ export default function Home() {
                   </div>
 
                   {/* Progress Bar */}
-                  {loading && uploadProgress > 0 && (
-                    <div className="w-full bg-gray-700 rounded-full h-2">
-                      <div 
-                        className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full transition-all duration-300"
-                        style={{ width: `${uploadProgress}%` }}
-                      />
+                  {loading && (
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center text-sm text-gray-600">
+                        <span>
+                          {step === 'form' && 'Preparing...'}
+                          {step === 'signing' && 'Waiting for signature...'}
+                          {step === 'executing' && 'Creating token...'}
+                          {step === 'completed' && 'Completed!'}
+                        </span>
+                        {uploadProgress > 0 && (
+                          <span>{uploadProgress}%</span>
+                        )}
+                      </div>
+                      <div className="w-full bg-gray-200 rounded-full h-2">
+                        <div 
+                          className="gradient-primary h-2 rounded-full transition-all duration-300"
+                          style={{ 
+                            width: step === 'signing' ? '90%' : 
+                                   step === 'executing' ? '95%' : 
+                                   step === 'completed' ? '100%' : 
+                                   `${uploadProgress}%` 
+                          }}
+                        />
+                      </div>
                     </div>
                   )}
 
@@ -476,68 +532,63 @@ export default function Home() {
                   <button
                     type="submit"
                     disabled={loading || !connected}
-                    className="w-full py-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 disabled:from-gray-600 disabled:to-gray-700 text-white font-semibold text-lg rounded-lg transition-all duration-300 disabled:cursor-not-allowed shadow-lg hover:shadow-xl"
+                    className="w-full py-4 btn-gradient text-white font-semibold text-lg rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {loading ? 'Creating Token...' : 'Create Token (0.1 SOL)'}
+                    {step === 'form' && !loading && 'Create Token'}
+                    {step === 'form' && loading && 'Preparing...'}
+                    {step === 'signing' && 'Please Sign Transaction'}
+                    {step === 'executing' && 'Creating Token...'}
+                    {step === 'completed' && 'Token Created!'}
                   </button>
                 </form>
 
-                {/* Token Features */}
-                <div className="mt-8 p-4 bg-gradient-to-r from-blue-500/10 to-purple-600/10 rounded-lg border border-blue-500/20">
-                  <h3 className="font-semibold mb-2 text-blue-300">Token Features</h3>
-                  <ul className="text-sm text-gray-300 space-y-1">
-                    <li>• Supply: 1,000,000,000 tokens (all to you)</li>
-                    <li>• Fee: 0.1 SOL (deducted from platform)</li>
-                    <li>• Immutable: No mint/freeze/update authority</li>
-                    <li>• Standard: SPL Token with Metaplex metadata</li>
-                  </ul>
-                </div>
+
               </div>
 
               {/* Error */}
               {error && (
-                <div className="mt-6 p-4 bg-gradient-to-r from-red-500/20 to-red-600/20 border border-red-500/50 rounded-lg backdrop-blur-sm">
-                  <p className="text-red-200">{error}</p>
+                <div className="mt-6 p-4 status-error rounded-lg">
+                  <p className="text-red-800">{error}</p>
                 </div>
               )}
 
               {/* Success Result */}
               {result && (
-                <div className="mt-6 p-6 bg-gradient-to-r from-green-500/20 to-emerald-500/20 border border-green-500/50 rounded-lg backdrop-blur-sm">
-                  <h3 className="text-green-200 font-semibold text-xl mb-4">Token Created Successfully!</h3>
+                <div className="mt-6 p-6 status-success rounded-lg">
+                  <h3 className="text-green-800 font-semibold text-xl mb-4">Token Created Successfully!</h3>
                   
                   <div className="space-y-3 text-sm">
                     <div className="flex justify-between">
-                      <span className="text-gray-300">Token Address:</span>
-                      <span className="font-mono text-green-200 break-all">{result.mintAddress}</span>
+                      <span className="text-gray-700">Token Address:</span>
+                      <span className="font-mono text-green-800 break-all">{result.mintAddress}</span>
                     </div>
                     
                     <div className="flex justify-between">
-                      <span className="text-gray-300">Your Balance:</span>
-                      <span className="text-green-200">{(Number(result.userBalance) / 1e9).toLocaleString('en-US')} tokens</span>
+                      <span className="text-gray-700">Your Balance:</span>
+                      <span className="text-green-800">{(Number(result.userBalance) / 1e9).toLocaleString('en-US')} tokens</span>
                     </div>
                     
                     <div className="flex justify-between">
-                      <span className="text-gray-300">Platform Fee:</span>
-                      <span className="text-green-200">{result.fee} SOL</span>
+                      <span className="text-gray-700">Platform Fee:</span>
+                      <span className="text-green-800">{result.fee} SOL</span>
                     </div>
                   </div>
 
                   <div className="mt-6 flex flex-wrap gap-3">
                     <a
-                      href={`https://solscan.io/token/${result.mintAddress}?cluster=mainnet`}
+                      href={`https://solana.fm/address/${result.mintAddress}?cluster=mainnet-beta`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white rounded-lg text-sm transition-colors"
+                      className="px-4 py-2 btn-gradient text-white rounded-lg text-sm"
                     >
                       View Token
                     </a>
                     
                     <a
-                      href={`https://solscan.io/account/${result.userTokenAccount}?cluster=mainnet`}
+                      href={`https://solana.fm/address/${result.userTokenAccount}?cluster=mainnet-beta`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-lg text-sm transition-colors"
+                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm transition-colors"
                     >
                       View Balance
                     </a>
@@ -546,7 +597,7 @@ export default function Home() {
                       href={result.explorerUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="px-4 py-2 bg-gradient-to-r from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700 text-white rounded-lg text-sm transition-colors"
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors"
                     >
                       View Transaction
                     </a>
@@ -554,7 +605,6 @@ export default function Home() {
                 </div>
               )}
             </div>
-          )}
         </div>
       </div>
     </>

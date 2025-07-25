@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, LAMPORTS_PER_SOL, Transaction, SystemProgram } from '@solana/web3.js';
 import { 
   createFungible,
   mplTokenMetadata,
@@ -19,7 +19,10 @@ import {
   LaunchTokenRequest, 
   LaunchTokenResponse, 
   TokenStatusResponse,
-  TokenMetadata
+  TokenMetadata,
+  PrepareTokenRequest,
+  PrepareTokenResponse,
+  ExecuteTokenRequest
 } from '../models/index';
 import { createLogger } from '../utils/logger';
 import { 
@@ -31,9 +34,16 @@ import {
   publicKey
 } from '@metaplex-foundation/umi';
 import { createUmi } from '@metaplex-foundation/umi-bundle-defaults';
-import { Transaction, SystemProgram } from '@solana/web3.js';
 
 const logger = createLogger('TokenService');
+
+// Session storage for token creation process
+interface TokenSession {
+  mintKeypair: Keypair;
+  request: PrepareTokenRequest;
+  metadataUri: string;
+  createdAt: number;
+}
 
 // Simple token mint - no pool, no DBC
 export class TokenService {
@@ -41,13 +51,35 @@ export class TokenService {
   private walletService: WalletService;
   private ipfsService: IpfsService;
   private umi: Umi | null = null;
+  private tokenSessions: Map<string, TokenSession> = new Map();
 
   constructor() {
-    this.connection = new Connection(config.rpcUrl, config.commitment as any);
+    this.connection = new Connection(config.rpcUrl, 'confirmed');
     this.walletService = new WalletService();
     this.ipfsService = new IpfsService();
     
+    // Clean old sessions every hour
+    setInterval(() => {
+      this.cleanOldSessions();
+    }, 60 * 60 * 1000);
+    
     logger.info('🎯 Simple TokenService initialized (no DBC, no pools)');
+  }
+
+  private cleanOldSessions() {
+    const now = Date.now();
+    const oneHour = 60 * 60 * 1000;
+    
+    for (const [sessionId, session] of this.tokenSessions.entries()) {
+      if (now - session.createdAt > oneHour) {
+        this.tokenSessions.delete(sessionId);
+        logger.info(`🧹 Cleaned old session: ${sessionId}`);
+      }
+    }
+  }
+
+  private generateSessionId(): string {
+    return Math.random().toString(36).substring(2) + Date.now().toString(36);
   }
 
   private initializeUmi(): void {
@@ -118,8 +150,8 @@ export class TokenService {
       if (request.twitter) {
         metadata.attributes?.push({ trait_type: 'Twitter', value: request.twitter });
       }
-      if (request.discord) {
-        metadata.attributes?.push({ trait_type: 'Discord', value: request.discord });
+      if (request.telegram) {
+        metadata.attributes?.push({ trait_type: 'Telegram', value: request.telegram });
       }
 
       const metadataUri = await this.ipfsService.uploadJson(metadata);
@@ -227,7 +259,7 @@ export class TokenService {
         totalSupply: config.defaultSupply.toString(),
         userBalance: config.defaultSupply.toString(), // All tokens go to user
         transactionSignature: Buffer.from(createTokenTx.signature).toString('base64'),
-        explorerUrl: `https://explorer.solana.com/tx/${Buffer.from(createTokenTx.signature).toString('base64')}?cluster=mainnet`,
+        explorerUrl: `https://solana.fm/tx/${Buffer.from(createTokenTx.signature).toString('base64')}?cluster=mainnet-beta`,
         fee: (feeAmount / LAMPORTS_PER_SOL).toString() // Fee deducted from master wallet
       };
 
@@ -240,6 +272,244 @@ export class TokenService {
     } catch (error) {
       logger.error('❌ Token mint failed:', error);
       throw new Error(`Token mint failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async prepareTokenTransaction(request: PrepareTokenRequest): Promise<PrepareTokenResponse> {
+    try {
+      logger.info('🚀 Preparing token transaction');
+      logger.info(`Token: ${request.name} (${request.symbol})`);
+      logger.info(`User wallet: ${request.userWallet}`);
+      
+      this.initializeUmi();
+      this.validateTokenRequest(request);
+      
+      // Generate session ID and mint keypair
+      const sessionId = this.generateSessionId();
+      const mintKeypair = Keypair.generate();
+      
+      logger.info(`📍 Session ID: ${sessionId}`);
+      logger.info(`📍 Mint address: ${mintKeypair.publicKey.toBase58()}`);
+      
+      // Handle image upload
+      let imageUrl = request.imageUrl || '';
+      if (request.imageUpload && !imageUrl) {
+        try {
+          logger.info('📷 Uploading image to IPFS...');
+          const imageBuffer = Buffer.from(request.imageUpload, 'base64');
+          imageUrl = await this.ipfsService.uploadImage(imageBuffer, `${request.symbol}_logo.png`);
+          logger.info(`✅ Image uploaded: ${imageUrl}`);
+        } catch (error) {
+          logger.error('❌ Image upload failed:', error);
+          imageUrl = '';
+        }
+      }
+
+      // Create metadata
+      const metadata: MetadataJson = {
+        name: request.name,
+        symbol: request.symbol,
+        description: request.description || `${request.name} - Simple immutable token`,
+        image: imageUrl,
+        external_url: request.website || '',
+        attributes: [
+          { trait_type: 'Platform', value: 'Launchium' },
+          { trait_type: 'Standard', value: 'SPL Token' },
+          { trait_type: 'Decimals', value: config.defaultDecimals },
+          { trait_type: 'Supply', value: '1,000,000,000' },
+          { trait_type: 'Immutable', value: 'true' }
+        ]
+      };
+
+      if (request.website) {
+        metadata.attributes?.push({ trait_type: 'Website', value: request.website });
+      }
+      if (request.twitter) {
+        metadata.attributes?.push({ trait_type: 'Twitter', value: request.twitter });
+      }
+      if (request.telegram) {
+        metadata.attributes?.push({ trait_type: 'Telegram', value: request.telegram });
+      }
+
+      const metadataUri = await this.ipfsService.uploadJson(metadata);
+      logger.info(`📄 Metadata uploaded: ${metadataUri}`);
+
+      // Create transaction for user to sign
+      const userWalletPubkey = new PublicKey(request.userWallet);
+      const userTokenAccount = await getAssociatedTokenAddress(mintKeypair.publicKey, userWalletPubkey);
+      
+      const transaction = new Transaction();
+      
+      // Add create ATA instruction (user pays for their own ATA)
+      const createATAInstruction = createAssociatedTokenAccountInstruction(
+        userWalletPubkey, // payer (user pays)
+        userTokenAccount, // ata
+        userWalletPubkey, // owner
+        mintKeypair.publicKey // mint
+      );
+      transaction.add(createATAInstruction);
+      
+      // Get recent blockhash
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      transaction.recentBlockhash = blockhash;
+      transaction.feePayer = userWalletPubkey;
+      
+      // Partially sign with mint keypair (but user still needs to sign)
+      transaction.partialSign(mintKeypair);
+      
+      // Store session
+      this.tokenSessions.set(sessionId, {
+        mintKeypair,
+        request,
+        metadataUri,
+        createdAt: Date.now()
+      });
+      
+      // Serialize transaction for frontend
+      const serializedTransaction = transaction.serialize({
+        requireAllSignatures: false,
+        verifySignatures: false
+      }).toString('base64');
+      
+      logger.info('✅ Transaction prepared for user signature');
+      
+      return {
+        success: true,
+        sessionId,
+        mintAddress: mintKeypair.publicKey.toBase58(),
+        transaction: serializedTransaction,
+        message: `Token ${request.name} (${request.symbol}) hazırlandı. Lütfen wallet'ınızdan onaylayın.`
+      };
+
+    } catch (error) {
+      logger.error('❌ Token preparation failed:', error);
+      throw new Error(`Token preparation failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  async executeTokenTransaction(request: ExecuteTokenRequest): Promise<LaunchTokenResponse> {
+    try {
+      logger.info('🎯 Executing token transaction');
+      logger.info(`Session ID: ${request.sessionId}`);
+      
+      // Get session
+      const session = this.tokenSessions.get(request.sessionId);
+      if (!session) {
+        throw new Error('Session not found or expired');
+      }
+      
+      this.initializeUmi();
+      
+      // Deserialize signed transaction
+      const signedTransaction = Transaction.from(Buffer.from(request.signedTransaction, 'base64'));
+      
+      // Send the user's signed transaction (creates ATA)
+      logger.info('📤 Sending user transaction...');
+      const userTxSignature = await this.connection.sendRawTransaction(signedTransaction.serialize());
+      await this.connection.confirmTransaction(userTxSignature, 'confirmed');
+      logger.info(`✅ User transaction confirmed: ${userTxSignature}`);
+      
+      // Now create token with metadata using UMI (master wallet pays)
+      // Create UMI signer from session keypair for mint account
+      const mint = createSignerFromKeypair(this.umi!, {
+        publicKey: publicKey(session.mintKeypair.publicKey.toBase58()),
+        secretKey: session.mintKeypair.secretKey
+      });
+      
+      // Set the master wallet as authority for creating the token
+      const originalAuthority = this.umi!.identity;
+      this.umi! = this.umi!.use(signerIdentity(createSignerFromKeypair(this.umi!, {
+        publicKey: publicKey(this.walletService.getMasterKeypair().publicKey.toBase58()),
+        secretKey: this.walletService.getMasterKeypair().secretKey
+      })));
+      
+      logger.info('🔨 Creating token with metadata...');
+      const createTokenTx = await createFungible(this.umi!, {
+        mint,
+        name: session.request.name,
+        symbol: session.request.symbol,
+        uri: session.metadataUri,
+        sellerFeeBasisPoints: percentAmount(0),
+        decimals: config.defaultDecimals,
+        isMutable: false,
+        splTokenProgram: publicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+      }).sendAndConfirm(this.umi!);
+      
+      // Restore original authority
+      this.umi! = this.umi!.use(signerIdentity(originalAuthority));
+      
+      logger.info('✅ Token created, waiting for confirmation...');
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Mint tokens to user
+      const userWalletPubkey = new PublicKey(session.request.userWallet);
+      const userTokenAccount = await getAssociatedTokenAddress(session.mintKeypair.publicKey, userWalletPubkey);
+      const mintAmount = Number(config.defaultSupply);
+      
+      logger.info('💎 Minting tokens to user...');
+      const mintSignature = await mintTo(
+        this.connection,
+        this.walletService.getMasterKeypair(), // payer (master pays gas)
+        session.mintKeypair.publicKey, // mint
+        userTokenAccount, // destination
+        this.walletService.getMasterKeypair(), // mint authority (master)
+        mintAmount // amount
+      );
+      
+      await this.connection.confirmTransaction(mintSignature, 'confirmed');
+      logger.info(`✅ Minted ${(mintAmount / (10 ** config.defaultDecimals)).toLocaleString()} tokens to user`);
+      
+      // Revoke authorities
+      logger.info('🔒 Revoking mint authority...');
+      await setAuthority(
+        this.connection,
+        this.walletService.getMasterKeypair(),
+        session.mintKeypair.publicKey,
+        this.walletService.getMasterKeypair(),
+        AuthorityType.MintTokens,
+        null
+      );
+      
+      logger.info('🔒 Revoking freeze authority...');
+      await setAuthority(
+        this.connection,
+        this.walletService.getMasterKeypair(),
+        session.mintKeypair.publicKey,
+        this.walletService.getMasterKeypair(),
+        AuthorityType.FreezeAccount,
+        null
+      );
+      
+      logger.info('✅ All authorities revoked - token is now immutable');
+      
+      // Prepare response
+      const metadataPda = findMetadataPda(this.umi!, { mint: mint.publicKey });
+      const feeAmount = 0.1 * LAMPORTS_PER_SOL;
+      
+      const response: LaunchTokenResponse = {
+        success: true,
+        mintAddress: session.mintKeypair.publicKey.toBase58(),
+        metadataAddress: metadataPda[0].toString(),
+        userTokenAccount: userTokenAccount.toBase58(),
+        totalSupply: config.defaultSupply.toString(),
+        userBalance: config.defaultSupply.toString(),
+        transactionSignature: Buffer.from(createTokenTx.signature).toString('base64'),
+        explorerUrl: `https://solana.fm/tx/${Buffer.from(createTokenTx.signature).toString('base64')}?cluster=mainnet-beta`,
+        fee: (feeAmount / LAMPORTS_PER_SOL).toString()
+      };
+      
+      // Clean up session
+      this.tokenSessions.delete(request.sessionId);
+      
+      logger.info('🎉 Token creation completed successfully!');
+      logger.info(`Token Address: ${response.mintAddress}`);
+      logger.info(`User receives: ${(Number(config.defaultSupply) / (10 ** config.defaultDecimals)).toLocaleString()} tokens`);
+      
+      return response;
+      
+    } catch (error) {
+      logger.error('❌ Token execution failed:', error);
+      throw new Error(`Token execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 

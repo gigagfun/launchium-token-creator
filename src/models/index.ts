@@ -5,15 +5,40 @@ export interface CreateWalletResponse {
 }
 
 export interface LaunchTokenRequest {
-  userWallet: string; // Receives tokens after mint (with fee deducted from master wallet)
+  userWallet: string;
   name: string;
   symbol: string;
-  description: string;
-  imageUrl?: string; // Can be IPFS CID or URL
-  imageUpload?: string; // Base64 encoded image for upload
+  description?: string;
+  imageUpload?: string; // base64 string
+  imageUrl?: string;
   website?: string;
   twitter?: string;
-  discord?: string;
+  telegram?: string;
+}
+
+export interface PrepareTokenRequest {
+  userWallet: string;
+  name: string;
+  symbol: string;
+  description?: string;
+  imageUpload?: string; // base64 string
+  imageUrl?: string;
+  website?: string;
+  twitter?: string;
+  telegram?: string;
+}
+
+export interface PrepareTokenResponse {
+  success: boolean;
+  sessionId: string;
+  mintAddress: string;
+  transaction: string; // base64 encoded transaction
+  message: string;
+}
+
+export interface ExecuteTokenRequest {
+  sessionId: string;
+  signedTransaction: string; // base64 encoded signed transaction
 }
 
 export interface LaunchTokenResponse {
@@ -22,10 +47,10 @@ export interface LaunchTokenResponse {
   metadataAddress: string;
   userTokenAccount: string;
   totalSupply: string;
-  userBalance: string; // Tokens sent to user
+  userBalance: string;
   transactionSignature: string;
   explorerUrl: string;
-  fee: string; // Fee deducted from master wallet (in SOL)
+  fee: string;
 }
 
 export interface TokenStatusResponse {
