@@ -2,7 +2,8 @@ import type { AppProps } from 'next/app'
 import { useMemo } from 'react'
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react'
 import { WalletAdapterNetwork } from '@solana/wallet-adapter-base'
-import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-wallets'
+// Standard Wallet adapters removed as per console warnings
+// import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-wallets'
 import { WalletModalProvider } from '@solana/wallet-adapter-react-ui'
 import { clusterApiUrl } from '@solana/web3.js'
 
@@ -23,14 +24,8 @@ export default function App({ Component, pageProps }: AppProps) {
     return clusterApiUrl(network)
   }, [network])
 
-  // Wallet adapters
-  const wallets = useMemo(
-    () => [
-      new PhantomWalletAdapter(),
-      new SolflareWalletAdapter(),
-    ],
-    []
-  )
+  // Standard Wallet adapters auto-detected, no manual adapters needed
+  const wallets = useMemo(() => [], [])
 
   return (
     <ConnectionProvider endpoint={endpoint}>
