@@ -64,15 +64,21 @@ export const config = {
 
 // Validate required environment variables
 export function validateConfig(): void {
+  console.log('🔍 Validating configuration...');
+  console.log('MASTER_WALLET_SECRET exists:', !!process.env.MASTER_WALLET_SECRET);
+  console.log('MASTER_WALLET_SECRET length:', process.env.MASTER_WALLET_SECRET?.length || 'undefined');
+  console.log('PLATFORM_REWARD_ADDRESS:', process.env.PLATFORM_REWARD_ADDRESS);
+  console.log('RPC_URL:', process.env.RPC_URL);
+
   if (!process.env.MASTER_WALLET_SECRET) {
     throw new Error('MASTER_WALLET_SECRET is required');
   }
 
   if (!process.env.PLATFORM_REWARD_ADDRESS) {
-    throw new Error('PLATFORM_REWARD_ADDRESS is required');
+    console.log('⚠️ PLATFORM_REWARD_ADDRESS not set, using default');
   }
 
   if (!process.env.RPC_URL) {
-    throw new Error('RPC_URL is required');
+    console.log('⚠️ RPC_URL not set, using default mainnet');
   }
 } 
