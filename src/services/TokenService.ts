@@ -459,7 +459,7 @@ export class TokenService {
         this.walletService.getMasterKeypair(), // payer (master pays gas)
         session.mintKeypair.publicKey, // mint
         userTokenAccount, // destination
-        this.walletService.getMasterKeypair(), // mint authority (master)
+        session.mintKeypair, // mint authority (mint keypair has authority)
         mintAmount // amount
       );
       
@@ -470,9 +470,9 @@ export class TokenService {
       logger.info('🔒 Revoking mint authority...');
       await setAuthority(
         this.connection,
-        this.walletService.getMasterKeypair(),
-        session.mintKeypair.publicKey,
-        this.walletService.getMasterKeypair(),
+        this.walletService.getMasterKeypair(), // payer
+        session.mintKeypair.publicKey, // mint
+        session.mintKeypair, // current authority
         AuthorityType.MintTokens,
         null
       );
@@ -480,9 +480,9 @@ export class TokenService {
       logger.info('🔒 Revoking freeze authority...');
       await setAuthority(
         this.connection,
-        this.walletService.getMasterKeypair(),
-        session.mintKeypair.publicKey,
-        this.walletService.getMasterKeypair(),
+        this.walletService.getMasterKeypair(), // payer
+        session.mintKeypair.publicKey, // mint
+        session.mintKeypair, // current authority
         AuthorityType.FreezeAccount,
         null
       );
