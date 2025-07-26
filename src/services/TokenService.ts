@@ -89,12 +89,19 @@ export class TokenService {
     
     this.umi = createUmi(config.rpcUrl).use(mplTokenMetadata());
     
-    const masterKeypair = this.walletService.getMasterKeypair();
-    const umiKeypair = this.umi.eddsa.createKeypairFromSecretKey(masterKeypair.secretKey);
-    const umiSigner = createSignerFromKeypair(this.umi, umiKeypair);
-    this.umi.use(signerIdentity(umiSigner));
-    
-    logger.info('✅ UMI initialized');
+    try {
+      const masterKeypair = this.walletService.getMasterKeypair();
+      logger.info('Master keypair public key:', masterKeypair.publicKey.toBase58());
+      
+      const umiKeypair = this.umi.eddsa.createKeypairFromSecretKey(masterKeypair.secretKey);
+      const umiSigner = createSignerFromKeypair(this.umi, umiKeypair);
+      this.umi.use(signerIdentity(umiSigner));
+      
+      logger.info('✅ UMI initialized with signer:', umiSigner.publicKey);
+    } catch (error) {
+      logger.error('Failed to initialize UMI:', error);
+      throw error;
+    }
   }
 
   async launchToken(request: LaunchTokenRequest): Promise<LaunchTokenResponse> {
