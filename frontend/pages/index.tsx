@@ -216,7 +216,7 @@ export default function Home() {
       console.log('🚀 Preparing token transaction:', requestData)
 
       const prepareResponse = await axios.post<PrepareTokenResponse>(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/token/prepare`,
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/token/prepare`,
         requestData,
         {
           timeout: 120000,
@@ -243,7 +243,7 @@ export default function Home() {
       console.log('⚡ Executing token creation...')
       
       const executeResponse = await axios.post<LaunchTokenResponse>(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000'}/api/token/execute`,
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/token/execute`,
         {
           sessionId: prepareResponse.data.sessionId,
           signedTransaction: signedTransaction.serialize().toString('base64')
