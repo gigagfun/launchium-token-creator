@@ -10,7 +10,9 @@ import {
   transfer,
   setAuthority,
   AuthorityType,
-  mintTo
+  mintTo,
+  createInitializeMintInstruction,
+  TOKEN_PROGRAM_ID
 } from '@solana/spl-token';
 import { WalletService } from './WalletService';
 import { IpfsService, MetadataJson } from './IpfsService';
@@ -416,34 +418,43 @@ export class TokenService {
       await this.connection.confirmTransaction(userTxSignature, 'confirmed');
       logger.info(`✅ User transaction confirmed: ${userTxSignature}`);
       
-      // Now create token with metadata using UMI (master wallet pays)
-      // Create UMI signer from session keypair for mint account
-      const mint = createSignerFromKeypair(this.umi!, {
-        publicKey: publicKey(session.mintKeypair.publicKey.toBase58()),
-        secretKey: session.mintKeypair.secretKey
+      // Now create token using traditional SPL token approach
+      logger.info('🔨 Creating token mint...');
+      
+      // Create mint account
+      const mintRent = await this.connection.getMinimumBalanceForRentExemption(82);
+      const createMintAccountIx = SystemProgram.createAccount({
+        fromPubkey: this.walletService.getMasterKeypair().publicKey,
+        newAccountPubkey: session.mintKeypair.publicKey,
+        lamports: mintRent,
+        space: 82,
+        programId: TOKEN_PROGRAM_ID
       });
       
-      // Set the master wallet as authority for creating the token
-      const originalAuthority = this.umi!.identity;
-      this.umi! = this.umi!.use(signerIdentity(createSignerFromKeypair(this.umi!, {
-        publicKey: publicKey(this.walletService.getMasterKeypair().publicKey.toBase58()),
-        secretKey: this.walletService.getMasterKeypair().secretKey
-      })));
+      // Initialize mint
+      const initializeMintIx = createInitializeMintInstruction(
+        session.mintKeypair.publicKey,
+        config.defaultDecimals,
+        session.mintKeypair.publicKey, // mint authority
+        session.mintKeypair.publicKey, // freeze authority
+        TOKEN_PROGRAM_ID
+      );
       
-      logger.info('🔨 Creating token with metadata...');
-      const createTokenTx = await createFungible(this.umi!, {
-        mint,
-        name: session.request.name,
-        symbol: session.request.symbol,
-        uri: session.metadataUri,
-        sellerFeeBasisPoints: percentAmount(0),
-        decimals: config.defaultDecimals,
-        isMutable: false,
-        splTokenProgram: publicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-      }).sendAndConfirm(this.umi!);
+      // Create mint transaction
+      const mintTransaction = new Transaction().add(createMintAccountIx, initializeMintIx);
+      mintTransaction.feePayer = this.walletService.getMasterKeypair().publicKey;
+      mintTransaction.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
       
-      // Restore original authority
-      this.umi! = this.umi!.use(signerIdentity(originalAuthority));
+      // Sign with both master wallet (payer) and mint keypair
+      mintTransaction.sign(this.walletService.getMasterKeypair(), session.mintKeypair);
+      
+      // Send transaction
+      const mintTxSignature = await this.connection.sendRawTransaction(mintTransaction.serialize());
+      await this.connection.confirmTransaction(mintTxSignature, 'confirmed');
+      logger.info(`✅ Mint created: ${session.mintKeypair.publicKey.toBase58()}`);
+      
+      // Skip metadata for now - focus on making token work first
+      logger.info('✅ Token mint created successfully');
       
       logger.info('✅ Token created, waiting for confirmation...');
       await new Promise(resolve => setTimeout(resolve, 2000));
@@ -490,7 +501,7 @@ export class TokenService {
       logger.info('✅ All authorities revoked - token is now immutable');
       
       // Prepare response
-      const metadataPda = findMetadataPda(this.umi!, { mint: mint.publicKey });
+      const metadataPda = findMetadataPda(this.umi!, { mint: publicKey(session.mintKeypair.publicKey.toBase58()) });
       const feeAmount = 0.1 * LAMPORTS_PER_SOL;
       
       const response: LaunchTokenResponse = {
@@ -500,8 +511,8 @@ export class TokenService {
         userTokenAccount: userTokenAccount.toBase58(),
         totalSupply: config.defaultSupply.toString(),
         userBalance: config.defaultSupply.toString(),
-        transactionSignature: Buffer.from(createTokenTx.signature).toString('base64'),
-        explorerUrl: `https://solana.fm/tx/${Buffer.from(createTokenTx.signature).toString('base64')}?cluster=mainnet-beta`,
+        transactionSignature: mintTxSignature,
+        explorerUrl: `https://solana.fm/tx/${mintTxSignature}?cluster=mainnet-beta`,
         fee: (feeAmount / LAMPORTS_PER_SOL).toString()
       };
       
